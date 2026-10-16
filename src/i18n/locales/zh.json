@@ -3242,6 +3242,7 @@
       "directoryConflict": "技能目录 '{{directory}}' 已被 {{existing_repo}} 占用，无法从 {{new_repo}} 安装",
       "emptyArchive": "下载的压缩包为空",
       "invalidRepoRef": "仓库地址不合法：{{owner}}/{{name}}",
+      "archiveDownloadTooLarge": "压缩包下载大小超过 {{limit_mb}} MB 上限，已中止",
       "archiveTooLarge": "压缩包解压后超过 {{limit_mb}} MB 上限，已中止",
       "archiveTooManyEntries": "压缩包条目过多（{{count}}），上限 {{limit}}",
       "downloadFailed": "下载失败：HTTP {{status}}",

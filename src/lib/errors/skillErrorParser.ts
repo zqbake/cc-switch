@@ -38,6 +38,7 @@ function getErrorI18nKey(code: string): string {
     SKILL_DIRECTORY_CONFLICT: "skills.error.directoryConflict",
     EMPTY_ARCHIVE: "skills.error.emptyArchive",
     INVALID_REPO_REF: "skills.error.invalidRepoRef",
+    ARCHIVE_DOWNLOAD_TOO_LARGE: "skills.error.archiveDownloadTooLarge",
     ARCHIVE_TOO_LARGE: "skills.error.archiveTooLarge",
     ARCHIVE_TOO_MANY_ENTRIES: "skills.error.archiveTooManyEntries",
     GET_HOME_DIR_FAILED: "skills.error.getHomeDirFailed",

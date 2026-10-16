@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -396,10 +397,13 @@ const DIRECTORY_BUDGET_COST: u64 = 4096;
 /// 文件同理：空文件与不足一块的小文件照样占 inode 和一个磁盘块。只按内容字节
 /// 计费时，一个全是空文件的归档能让预算读数一直停在 0，条目上限就成了唯一防线。
 const FILE_ENTRY_BUDGET_COST: u64 = DIRECTORY_BUDGET_COST;
-/// 压缩体上限。解压预算只有在 ZipArchive 建起来之后才生效，而那时整个响应体
-/// 已经在内存里了，所以下载这一步需要自己的上限。技能仓库是 Markdown，
-/// 128 MiB 的压缩包已经远超正常规模。
-const MAX_ARCHIVE_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
+/// 压缩体上限。下载阶段会流式写入临时文件，不再把整个响应体放进内存；
+/// 仍保留独立的有界下载预算，避免异常大的归档持续占用磁盘。
+///
+/// 512 MiB 可以容纳真实的完整 Skill 仓库（例如 scientific-agent-skills），
+/// 同时仍小于无限制下载会带来的资源风险。解压后的磁盘/inode 预算由
+/// `MAX_ARCHIVE_TOTAL_BYTES` 单独控制。
+const MAX_ARCHIVE_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 /// 技能元数据 (从 SKILL.md 解析)
 #[derive(Debug, Clone, Deserialize)]
@@ -3603,25 +3607,27 @@ impl SkillService {
             )));
         }
 
-        // 逐块读并卡住压缩体大小：`response.bytes()` 会先把攻击者控制的整个归档
-        // 收进内存，之后才轮到 ZipArchive 和解压预算——那时候堆已经被吃光了。
-        // 不能只信 Content-Length（可以撒谎或缺失），必须按实际收到的字节数算。
+        // 逐块读并卡住压缩体大小：不能只信 Content-Length（可以撒谎或缺失），
+        // 必须按实际收到的字节数算。将响应流式写入临时文件，避免把合法的大仓库
+        // 整个缓存在内存中；NamedTempFile 的生命周期也保证失败时自动清理。
         let mut response = response;
-        let mut body: Vec<u8> = Vec::new();
+        let mut archive_file = tempfile::NamedTempFile::new_in(dest)?;
+        let mut downloaded_bytes = 0u64;
         while let Some(chunk) = response.chunk().await? {
-            if body.len().saturating_add(chunk.len()) as u64 > MAX_ARCHIVE_DOWNLOAD_BYTES {
+            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+            if downloaded_bytes > MAX_ARCHIVE_DOWNLOAD_BYTES {
                 let limit_mb = (MAX_ARCHIVE_DOWNLOAD_BYTES / 1024 / 1024).to_string();
                 return Err(anyhow::anyhow!(format_skill_error(
-                    "ARCHIVE_TOO_LARGE",
+                    "ARCHIVE_DOWNLOAD_TOO_LARGE",
                     &[("limit_mb", &limit_mb)],
                     Some("checkZipContent"),
                 )));
             }
-            body.extend_from_slice(&chunk);
+            archive_file.write_all(&chunk)?;
         }
+        archive_file.as_file_mut().flush()?;
 
-        let cursor = std::io::Cursor::new(body);
-        let archive = zip::ZipArchive::new(cursor)?;
+        let archive = zip::ZipArchive::new(archive_file.reopen()?)?;
         Self::extract_repo_archive(archive, dest)
     }
 
@@ -4717,6 +4723,108 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn serve_archive_download(
+        mut reader: impl std::io::Read + Send + 'static,
+        content_length: Option<u64>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut request = [0u8; 4096];
+            let request_len = stream.read(&mut request).unwrap();
+            assert!(request_len > 0, "the client must send an HTTP request");
+            write!(stream, "HTTP/1.0 200 OK\r\nConnection: close\r\n").unwrap();
+            if let Some(length) = content_length {
+                write!(stream, "Content-Length: {length}\r\n").unwrap();
+            }
+            stream.write_all(b"\r\n").unwrap();
+            // A size-limited client may close the connection before the body ends.
+            let _ = std::io::copy(&mut reader, &mut stream);
+        });
+        (format!("http://{address}/archive.zip"), server)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn download_and_extract_accepts_archives_above_the_old_download_limit() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        // #8421: non-skill assets can make a valid repo ZIP exceed 128 MiB.
+        // Store the fixture on disk so the test does not buffer that ZIP either.
+        let mut fixture = tempfile::NamedTempFile::new().unwrap();
+        let payload_bytes = 129 * 1024 * 1024;
+        let skill_md = b"---\nname: example\ndescription: test\n---\n";
+        {
+            let mut zip = zip::ZipWriter::new(fixture.as_file_mut());
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("repo-main/skills/example/SKILL.md", options)
+                .unwrap();
+            zip.write_all(skill_md).unwrap();
+            zip.start_file("repo-main/docs/large-asset.bin", options)
+                .unwrap();
+            std::io::copy(
+                &mut std::io::Read::take(std::io::repeat(7), payload_bytes),
+                &mut zip,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        let size = fixture.as_file().metadata().unwrap().len();
+        let (url, server) =
+            serve_archive_download(fs::File::open(fixture.path()).unwrap(), Some(size));
+        let destination = tempdir().unwrap();
+
+        let result = SkillService::new()
+            .download_and_extract(&url, destination.path())
+            .await;
+        server.join().unwrap();
+        result.expect("a valid archive above 128 MiB must install");
+        assert_eq!(
+            fs::read(destination.path().join("skills/example/SKILL.md")).unwrap(),
+            skill_md
+        );
+        assert_eq!(
+            fs::metadata(destination.path().join("docs/large-asset.bin"))
+                .unwrap()
+                .len(),
+            payload_bytes
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn download_and_extract_bounds_actual_bytes_without_content_length() {
+        let body = std::io::Read::take(std::io::repeat(0), 512 * 1024 * 1024 + 1);
+        let (url, server) = serve_archive_download(body, None);
+        let destination = tempdir().unwrap();
+        fs::write(destination.path().join("existing.txt"), b"keep").unwrap();
+
+        let result = SkillService::new()
+            .download_and_extract(&url, destination.path())
+            .await;
+        server.join().unwrap();
+        let error = result.expect_err("the download budget must also cover unknown-length bodies");
+        let structured: serde_json::Value = serde_json::from_str(&error.to_string()).unwrap();
+        assert_eq!(structured["code"], "ARCHIVE_DOWNLOAD_TOO_LARGE");
+        assert_eq!(structured["context"]["limit_mb"], "512");
+        assert_eq!(
+            fs::read(destination.path().join("existing.txt")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn skill_state_lock_allows_snapshots_but_excludes_writers() {

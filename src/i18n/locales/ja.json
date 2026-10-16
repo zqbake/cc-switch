@@ -3242,6 +3242,7 @@
       "directoryConflict": "スキルディレクトリ '{{directory}}' は既に {{existing_repo}} で使用されています。{{new_repo}} からインストールできません",
       "emptyArchive": "ダウンロードしたアーカイブが空です",
       "invalidRepoRef": "リポジトリの指定が不正です：{{owner}}/{{name}}",
+      "archiveDownloadTooLarge": "アーカイブのダウンロードサイズが {{limit_mb}} MB の上限を超えたため中止しました",
       "archiveTooLarge": "アーカイブが展開上限 {{limit_mb}} MB を超えたため中止しました",
       "archiveTooManyEntries": "アーカイブのエントリ数が多すぎます（{{count}}）。上限は {{limit}} です",
       "downloadFailed": "ダウンロードに失敗しました: HTTP {{status}}",

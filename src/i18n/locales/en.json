@@ -3242,6 +3242,7 @@
       "directoryConflict": "Skill directory '{{directory}}' is already occupied by {{existing_repo}}, cannot install from {{new_repo}}",
       "emptyArchive": "Downloaded archive is empty",
       "invalidRepoRef": "Invalid repository reference: {{owner}}/{{name}}",
+      "archiveDownloadTooLarge": "Archive download exceeds the {{limit_mb}} MB compressed-size limit; aborted",
       "archiveTooLarge": "Archive exceeds the {{limit_mb}} MB extraction limit; aborted",
       "archiveTooManyEntries": "Archive has too many entries ({{count}}); the limit is {{limit}}",
       "downloadFailed": "Download failed: HTTP {{status}}",

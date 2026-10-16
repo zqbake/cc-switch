@@ -34,4 +34,24 @@ describe("skillErrorReason", () => {
     );
     expect(skillErrorReason("", t)).toBe("common.error");
   });
+
+  it("distinguishes download size limits from extraction size limits", () => {
+    const downloadError = JSON.stringify({
+      code: "ARCHIVE_DOWNLOAD_TOO_LARGE",
+      context: { limit_mb: "512" },
+      suggestion: "checkZipContent",
+    });
+    expect(skillErrorReason(downloadError, t)).toBe(
+      'skills.error.archiveDownloadTooLarge:{"limit_mb":"512"}',
+    );
+
+    const extractionError = JSON.stringify({
+      code: "ARCHIVE_TOO_LARGE",
+      context: { limit_mb: "512" },
+      suggestion: "checkZipContent",
+    });
+    expect(skillErrorReason(extractionError, t)).toBe(
+      'skills.error.archiveTooLarge:{"limit_mb":"512"}',
+    );
+  });
 });
